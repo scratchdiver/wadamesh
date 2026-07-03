@@ -23726,6 +23726,7 @@ static void jumpToOldestCb(lv_event_t* e) {
 // newest message; hide it when at (or near) the bottom.
 static void chatVirtSyncBubblePositions(LvChatPanel* p);
 static void chatVirtOnScrollEnd(LvChatPanel* p);
+static void bubbleActionHoldCancel(lv_obj_t* obj = nullptr);
 static void chatUpdateJumpButtons(LvChatPanel* p) {
   if (!p || !p->msgs) return;
   if (p->jump_oldest_btn) {
@@ -23775,6 +23776,7 @@ static void chatMsgsScrollEndCb(lv_event_t* e) {
 static void msgsScrollCb(lv_event_t* e) {
   auto* p = static_cast<LvChatPanel*>(lv_event_get_user_data(e));
   if (!p || !p->msgs) return;
+  bubbleActionHoldCancel();
   chatUpdateJumpButtons(p);
   chatVirtSyncBubblePositions(p);
 #if TRACE_MESSAGE_SCROLL_ACTIVITY
@@ -25503,14 +25505,58 @@ static void openMessageInfoPopup(int msg_idx) {
   // the standard dismiss affordance now (same as every other popup).
 }
 
-// Long-press handler attached to each chat bubble. User-data is the
-// absolute msg index (as an intptr_t).
-static void bubbleLongPressMenuCb(lv_event_t* e) {
-  if (lv_event_get_code(e) != LV_EVENT_LONG_PRESSED) return;
+// Bubble-only long hold for message actions. LVGL's global LONG_PRESSED timeout
+// is 400 ms, which is too easy to trigger while reading chat; keep this local so
+// touch-to-scroll and other long-press affordances keep their existing timing.
+static constexpr uint32_t kChatBubbleActionHoldMs = 800;
+static lv_timer_t* s_chat_bubble_action_timer = nullptr;
+static lv_obj_t*   s_chat_bubble_action_obj   = nullptr;
+static int         s_chat_bubble_action_idx   = -1;
+
+static void bubbleActionHoldCancel(lv_obj_t* obj) {
+  if (obj && obj != s_chat_bubble_action_obj) return;
+  if (s_chat_bubble_action_timer) {
+    lv_timer_del(s_chat_bubble_action_timer);
+    s_chat_bubble_action_timer = nullptr;
+  }
+  s_chat_bubble_action_obj = nullptr;
+  s_chat_bubble_action_idx = -1;
+}
+
+static void bubbleActionHoldTimerCb(lv_timer_t* t) {
+  if (t == s_chat_bubble_action_timer) s_chat_bubble_action_timer = nullptr;
+  lv_obj_t* obj = s_chat_bubble_action_obj;
+  const int idx = s_chat_bubble_action_idx;
+  s_chat_bubble_action_obj = nullptr;
+  s_chat_bubble_action_idx = -1;
+  lv_timer_del(t);
+
+  if (!obj || !lv_obj_is_valid(obj) || idx < 0) return;
   lv_indev_t* act = lv_indev_get_act();
   if (act) lv_indev_wait_release(act);
-  const int idx = (int)(intptr_t)lv_event_get_user_data(e);
   openMessageActionMenu(idx);
+}
+
+// Press/release handler attached to each chat bubble. User-data is the absolute
+// msg index (as an intptr_t).
+static void bubbleLongPressMenuCb(lv_event_t* e) {
+  lv_obj_t* obj = lv_event_get_target(e);
+  switch (lv_event_get_code(e)) {
+    case LV_EVENT_PRESSED:
+      bubbleActionHoldCancel();
+      s_chat_bubble_action_obj = obj;
+      s_chat_bubble_action_idx = (int)(intptr_t)lv_event_get_user_data(e);
+      s_chat_bubble_action_timer = lv_timer_create(bubbleActionHoldTimerCb,
+                                                   kChatBubbleActionHoldMs, nullptr);
+      break;
+    case LV_EVENT_RELEASED:
+    case LV_EVENT_PRESS_LOST:
+    case LV_EVENT_DELETE:
+      bubbleActionHoldCancel(obj);
+      break;
+    default:
+      break;
+  }
 }
 
 // Helper: render a centered placeholder label into the (cleaned) msgs panel.
@@ -25757,6 +25803,7 @@ static void chatVirtFreeOffsets() {
 
 static void chatVirtReset(LvChatPanel* p) {
   (void)p;
+  bubbleActionHoldCancel();
   chatVirtCancelRenderTimer();
   if (s_chat_virt.divider) {
     lv_obj_del_async(s_chat_virt.divider);
@@ -26183,7 +26230,13 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   else { lv_label_set_long_mode(tlbl, LV_LABEL_LONG_WRAP); lv_obj_set_width(tlbl, kInnerMaxW); }
   lv_obj_set_pos(tlbl, 0, inner_y);
   lv_obj_add_flag(bubble, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(bubble, bubbleLongPressMenuCb, LV_EVENT_LONG_PRESSED,
+  lv_obj_add_event_cb(bubble, bubbleLongPressMenuCb, LV_EVENT_PRESSED,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  lv_obj_add_event_cb(bubble, bubbleLongPressMenuCb, LV_EVENT_RELEASED,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  lv_obj_add_event_cb(bubble, bubbleLongPressMenuCb, LV_EVENT_PRESS_LOST,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  lv_obj_add_event_cb(bubble, bubbleLongPressMenuCb, LV_EVENT_DELETE,
                       reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
 
   char ts_buf[20];
