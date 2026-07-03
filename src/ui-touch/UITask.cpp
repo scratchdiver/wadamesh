@@ -950,6 +950,7 @@ struct LvChatPanel {
   lv_obj_t* header_name;   // label: thread name in the overlay header
   lv_obj_t* msgs;          // read-only textarea: message history
   lv_obj_t* jump_btn;      // floating "jump to latest" button (Discord-style)
+  lv_obj_t* jump_oldest_btn; // floating "jump to oldest" button
   lv_obj_t* composer_row;  // container: input + send button
   lv_obj_t* composer_ta;   // textarea: user types here
   LvThreadButtonCtx ctx_store[UITask::MAX_UI_THREADS];
@@ -3381,6 +3382,7 @@ static void lvglTouchRead(lv_indev_drv_t* indev, lv_indev_data_t* data) {
 // ============================================================
 static void refreshChatDetail(LvChatPanel& p);
 static void chatVirtReset(LvChatPanel* p);
+static void chatVirtJumpToOldest(LvChatPanel* p);
 static void chatVirtJumpToLatest(LvChatPanel* p);
 static void chatVirtScheduleRender(LvChatPanel* p);
 static void refreshChatList(LvChatPanel& p);
@@ -4973,6 +4975,7 @@ static void closeChatPanel(LvChatPanel* p) {
   s_chat_just_opened = false;
   chatVirtReset(p);
   if (p->jump_btn) lv_obj_add_flag(p->jump_btn, LV_OBJ_FLAG_HIDDEN);
+  if (p->jump_oldest_btn) lv_obj_add_flag(p->jump_oldest_btn, LV_OBJ_FLAG_HIDDEN);
   setChatStatusTitle(nullptr);   // drop the thread name from the status bar
 }
 
@@ -18394,6 +18397,7 @@ static void makeChatList(lv_obj_t* tab, LvChatPanel& p, bool channel_mode, bool 
   p.header_name      = nullptr;
   p.msgs             = nullptr;
   p.jump_btn         = nullptr;
+  p.jump_oldest_btn  = nullptr;
   p.composer_row     = nullptr;
   p.composer_ta      = nullptr;
 
@@ -22895,10 +22899,27 @@ static void jumpToLatestCb(lv_event_t* e) {
   if (!p || !p->msgs) return;
   chatVirtJumpToLatest(p);
 }
+static void jumpToOldestCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  auto* p = static_cast<LvChatPanel*>(lv_event_get_user_data(e));
+  if (!p || !p->msgs) return;
+  chatVirtJumpToOldest(p);
+}
 // Show the jump-to-latest button whenever the list is scrolled up away from the
 // newest message; hide it when at (or near) the bottom.
 static void chatVirtSyncBubblePositions(LvChatPanel* p);
 static void chatVirtOnScrollEnd(LvChatPanel* p);
+static void chatUpdateJumpButtons(LvChatPanel* p) {
+  if (!p || !p->msgs) return;
+  if (p->jump_oldest_btn) {
+    if (lv_obj_get_scroll_y(p->msgs) > 30) lv_obj_clear_flag(p->jump_oldest_btn, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(p->jump_oldest_btn, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (p->jump_btn) {
+    if (lv_obj_get_scroll_bottom(p->msgs) > 30) lv_obj_clear_flag(p->jump_btn, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(p->jump_btn, LV_OBJ_FLAG_HIDDEN);
+  }
+}
 #if TRACE_MESSAGE_SCROLL_ACTIVITY
 static void chatVirtLogTopAnchor(const char* tag, LvChatPanel* p, lv_coord_t scroll_y,
                                  int touch_x = -1, int touch_y = -1);
@@ -22936,11 +22957,8 @@ static void chatMsgsScrollEndCb(lv_event_t* e) {
 }
 static void msgsScrollCb(lv_event_t* e) {
   auto* p = static_cast<LvChatPanel*>(lv_event_get_user_data(e));
-  if (!p || !p->msgs || !p->jump_btn) return;
-  if (lv_obj_get_scroll_bottom(p->msgs) > 30)
-    lv_obj_clear_flag(p->jump_btn, LV_OBJ_FLAG_HIDDEN);
-  else
-    lv_obj_add_flag(p->jump_btn, LV_OBJ_FLAG_HIDDEN);
+  if (!p || !p->msgs) return;
+  chatUpdateJumpButtons(p);
   chatVirtSyncBubblePositions(p);
 #if TRACE_MESSAGE_SCROLL_ACTIVITY
   if (s_chat_touch_on_msgs && s_chat_msgs_scroll_obj == p->msgs) {
@@ -23058,8 +23076,30 @@ static void makeChatDetail(LvChatPanel& p) {
   lv_obj_add_event_cb(p.msgs, chatMsgsTouchDbgCb, LV_EVENT_RELEASED, &p);
 #endif
 
-  // ---- Jump-to-latest button (Discord-style): floating circle, bottom-right,
-  //      just above the composer. Hidden unless scrolled up from the newest msg.
+  // ---- Jump buttons (Discord-style): floating circles, right edge, symmetric
+  //      near the top/bottom of the message list. Hidden unless there is
+  //      history beyond the viewport.
+  p.jump_oldest_btn = lv_btn_create(p.overlay);
+  lv_obj_set_size(p.jump_oldest_btn, 40, 40);
+  lv_obj_set_style_radius(p.jump_oldest_btn, 20, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(p.jump_oldest_btn, lv_color_hex(COLOR_ACCENT), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(p.jump_oldest_btn, LV_OPA_90, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(p.jump_oldest_btn, 6, LV_PART_MAIN);
+  lv_obj_set_style_shadow_opa(p.jump_oldest_btn, LV_OPA_40, LV_PART_MAIN);
+  lv_obj_set_pos(p.jump_oldest_btn, chatScreenW() - 50, CHAT_HDR_H + STATUSBAR_H + 2);
+  lv_obj_t* jolbl = lv_label_create(p.jump_oldest_btn);
+  lv_label_set_text(jolbl, LV_SYMBOL_UP);
+  lv_obj_set_style_text_color(jolbl, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+  lv_obj_center(jolbl);
+#if defined(HAS_TANMATSU)
+  styleChipAsFkey(p.jump_oldest_btn, jolbl, 4, 0xC724B1, 40, true);
+  lv_obj_set_style_bg_color(p.jump_oldest_btn, lv_color_hex(0x101113), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(p.jump_oldest_btn, LV_OPA_70, LV_PART_MAIN);
+  lv_obj_set_style_radius(p.jump_oldest_btn, 8, LV_PART_MAIN);
+#endif
+  lv_obj_add_event_cb(p.jump_oldest_btn, jumpToOldestCb, LV_EVENT_CLICKED, &p);
+  lv_obj_add_flag(p.jump_oldest_btn, LV_OBJ_FLAG_HIDDEN);
+
   p.jump_btn = lv_btn_create(p.overlay);
   lv_obj_set_size(p.jump_btn, 40, 40);
   lv_obj_set_style_radius(p.jump_btn, 20, LV_PART_MAIN);
@@ -25467,6 +25507,24 @@ static lv_coord_t chatVirtBottomScrollY(LvChatPanel* p) {
   return target > 0 ? target : 0;
 }
 
+static void chatVirtJumpToOldest(LvChatPanel* p) {
+  if (!p || !p->msgs) return;
+  CHAT_SCROLL_TRACE_PRINTF("[CHAT] jump_to_oldest (n=%d virt_h=%d lv_h=%d)\n", s_chat_virt.n,
+                           (int)s_chat_virt.virt_total_h, (int)s_chat_virt.lv_total_h);
+  chatVirtResetInputForMsgs(p);
+  chatVirtCancelRenderTimer();
+  s_chat_virt.last_i0 = -1;
+  s_chat_virt.last_i1 = -1;
+  lv_obj_scroll_to_y(p->msgs, 0, LV_ANIM_OFF);
+  if (s_chat_virt.panel == p && s_chat_virt.n > 0) {
+    lv_obj_update_layout(p->msgs);
+    chatVirtRefreshScrollArea(p);
+    chatVirtRenderWindow(p, lv_obj_get_scroll_y(p->msgs), nullptr);
+    CHAT_SCROLL_TRACE_DO(chatVirtLogTopAnchor("jump_to_oldest_after", p, lv_obj_get_scroll_y(p->msgs)));
+  }
+  chatUpdateJumpButtons(p);
+}
+
 static void chatVirtJumpToLatest(LvChatPanel* p) {
   if (!p || !p->msgs) return;
   CHAT_SCROLL_TRACE_PRINTF("[CHAT] jump_to_latest (n=%d virt_h=%d lv_h=%d)\n", s_chat_virt.n,
@@ -25479,13 +25537,13 @@ static void chatVirtJumpToLatest(LvChatPanel* p) {
   s_chat_virt.last_i0 = -1;
   s_chat_virt.last_i1 = -1;
   lv_obj_scroll_to_y(p->msgs, target_y, LV_ANIM_OFF);
-  if (p->jump_btn) lv_obj_add_flag(p->jump_btn, LV_OBJ_FLAG_HIDDEN);
   if (s_chat_virt.panel == p && s_chat_virt.n > 0) {
     lv_obj_update_layout(p->msgs);
     chatVirtRefreshScrollArea(p);
     chatVirtRenderWindow(p, lv_obj_get_scroll_y(p->msgs), nullptr);
     CHAT_SCROLL_TRACE_DO(chatVirtLogTopAnchor("jump_to_latest_after", p, lv_obj_get_scroll_y(p->msgs)));
   }
+  chatUpdateJumpButtons(p);
 }
 
 static void refreshChatDetail(LvChatPanel& p) {
@@ -25608,10 +25666,7 @@ static void refreshChatDetail(LvChatPanel& p) {
 
   s_chat_just_opened  = false;
   s_chat_jump_msg_idx = -1;
-  if (p.jump_btn) {
-    if (lv_obj_get_scroll_bottom(p.msgs) > 30) lv_obj_clear_flag(p.jump_btn, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(p.jump_btn, LV_OBJ_FLAG_HIDDEN);
-  }
+  chatUpdateJumpButtons(&p);
 }
 
 // Format hour:minute honoring the 12/24-hour clock preference. 12h drops the
