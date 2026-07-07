@@ -25614,10 +25614,15 @@ static constexpr lv_coord_t  kChatBubblePadH     = 8;
 static constexpr lv_coord_t  kChatBubblePadV     = 5;
 static constexpr lv_coord_t  kChatSideGutter     = 2;
 static constexpr lv_coord_t  kChatRowGap         = 4;
+static constexpr lv_coord_t  kChatCompactRowGap = 2;
 static constexpr lv_coord_t  kChatDividerH       = 16;
 
 static lv_coord_t chatMeasureBubbleHeight(const UITask::UIMessage& m, bool channel_mode,
                                           bool thread_is_room, lv_coord_t bubble_max_w);
+static lv_coord_t chatMeasureMessageRowHeight(const UITask::UIMessage& m, LvChatPanel* p,
+                                              int logical_i);
+static lv_coord_t chatVirtCreateMessageRow(LvChatPanel* p, int logical_i, int ring_idx,
+                                           lv_coord_t vp_y, lv_coord_t* out_jump_y);
 static lv_coord_t chatVirtMsgContentY(int logical_i);
 static lv_coord_t chatVirtMsgContentBottom(int logical_i);
 static lv_coord_t chatVirtMsgViewportY(int logical_i, int32_t virt_top);
@@ -25638,6 +25643,8 @@ struct ChatVirtLayout {
   int          last_i0       = -1;
   int          last_i1       = -1;
   bool         thread_is_room = false;
+  bool         compact_chat   = false;
+  char         compact_thread_name[UITask::MAX_THREAD_NAME + 1] = "";
   lv_coord_t   content_w     = 0;
   lv_coord_t   bubble_max_w  = 0;
   int*         msg_idx       = nullptr;
@@ -25676,8 +25683,7 @@ static lv_coord_t chatVirtLastBubbleHeight(LvChatPanel* p, int n) {
   if (!p || n <= 0 || !s_chat_msg_idx || !g_lv.task) return 40;
   UITask::UIMessage m;
   if (!g_lv.task->getMessageByIndex(s_chat_msg_idx[n - 1], m)) return 40;
-  return chatMeasureBubbleHeight(m, p->channel_mode, s_chat_virt.thread_is_room,
-                                 s_chat_virt.bubble_max_w);
+  return chatMeasureMessageRowHeight(m, p, n - 1);
 }
 
 static void chatVirtUpdateLvScale(LvChatPanel* p, int n, int32_t virt_total) {
@@ -25744,8 +25750,7 @@ static lv_coord_t chatVirtMeasuredHeightAt(LvChatPanel* p, int logical_i) {
     return 40;
   UITask::UIMessage m;
   if (!g_lv.task->getMessageByIndex(s_chat_msg_idx[logical_i], m)) return 40;
-  return chatMeasureBubbleHeight(m, p->channel_mode, s_chat_virt.thread_is_room,
-                                 s_chat_virt.bubble_max_w);
+  return chatMeasureMessageRowHeight(m, p, logical_i);
 }
 
 #if TRACE_MESSAGE_SCROLL_ACTIVITY
@@ -25814,6 +25819,8 @@ static void chatVirtReset(LvChatPanel* p) {
   s_chat_virt.n      = 0;
   s_chat_virt.divider_i = -1;
   s_chat_virt.divider_y = -1;
+  s_chat_virt.compact_chat = false;
+  s_chat_virt.compact_thread_name[0] = '\0';
   s_chat_virt.virt_total_h = 0;
   s_chat_virt.lv_total_h   = 0;
   s_chat_virt.last_i0   = -1;
@@ -26043,6 +26050,81 @@ static lv_coord_t chatMeasureBubbleHeight(const UITask::UIMessage& m, bool chann
   return kChatBubblePadV * 2 + body_h;
 }
 
+static void chatBuildCompactLine(const UITask::UIMessage& m, LvChatPanel* p, int logical_i,
+                                 const ChatBubbleDisplay& d, char* line, size_t line_cap) {
+  if (!line || line_cap == 0) return;
+  line[0] = '\0';
+  const bool colorful_bubbles = touchPrefsGetColorfulBubbles();
+  lv_color_t bg_ignored = lv_color_hex(COLOR_RECV_BG);
+  lv_color_t sender_col = lv_color_hex(COLOR_ACCENT);
+  const char* color_name = m.outgoing ? the_mesh.getNodePrefs()->node_name : d.show_sender;
+  if (colorful_bubbles && color_name && color_name[0])
+    usernameBubbleColors(color_name, &bg_ignored, &sender_col);
+
+  const char* row_name = m.outgoing ? the_mesh.getNodePrefs()->node_name
+      : (d.san_sender[0] && !(d.san_sender[0] == 'r' && d.san_sender[1] == 'x' && d.san_sender[2] == '\0'))
+          ? d.san_sender : s_chat_virt.compact_thread_name;
+  char name_san[48];
+  copyUtf8ReplacingMissingGlyphs(&g_font_12, name_san, sizeof(name_san), row_name);
+  char esc_name[100];
+  char esc_text[2 * sizeof(d.san_text)];
+  recolorEscape(esc_name, sizeof(esc_name), name_san);
+  recolorEscape(esc_text, sizeof(esc_text), d.san_text);
+
+  char ts_c[12];
+  formatBubbleHhMm(m.ts, ts_c, sizeof(ts_c));
+  const char* dglyph = "";
+  uint32_t dfg = COLOR_SUB;
+  if (m.outgoing && !p->channel_mode && m.deliv_state != UITask::DELIV_NONE) {
+    switch (m.deliv_state) {
+      case UITask::DELIV_SENT:      dglyph = LV_SYMBOL_UPLOAD;          dfg = COLOR_SUB;    break;
+      case UITask::DELIV_DELIVERED: dglyph = LV_SYMBOL_OK LV_SYMBOL_OK; dfg = COLOR_ACCENT; break;
+      case UITask::DELIV_FAILED:    dglyph = LV_SYMBOL_CLOSE " tap to resend"; dfg = 0xE08080; break;
+    }
+  }
+  char reps[12] = "";
+  if (m.outgoing && m.sent_fp) {
+    const uint8_t r = the_mesh.uiRepeatsForFp(m.sent_fp);
+    if (r > 0) snprintf(reps, sizeof(reps), LV_SYMBOL_REFRESH "%u", (unsigned)r);
+  } else if (!m.outgoing && (m.meta_flags & UITask::MSG_META_HAS_RX)
+                         && (m.meta_flags & UITask::MSG_META_IS_FLOOD)) {
+    const uint8_t hops = (uint8_t)(m.path_len & 0x3F);
+    snprintf(reps, sizeof(reps), LV_SYMBOL_SHUFFLE "%u", (unsigned)hops);
+  }
+
+  const unsigned sc_hex = lv_color_to32(sender_col) & 0xFFFFFFu;
+  int off = 0;
+  if (ts_c[0])
+    off += snprintf(line + off, line_cap - off, "#%06X %s# ",
+                    (unsigned)(COLOR_SUB & 0xFFFFFFu), ts_c);
+  off += snprintf(line + off, line_cap - off, "#%06X %s:# %s", sc_hex, esc_name, esc_text);
+  if (off > (int)line_cap - 1) off = (int)line_cap - 1;
+  if ((dglyph[0] || reps[0]) && off < (int)line_cap - 32)
+    snprintf(line + off, line_cap - off, "  #%06X %s%s#", (unsigned)(dfg & 0xFFFFFFu), dglyph, reps);
+}
+
+static lv_coord_t chatMeasureCompactRowHeight(const UITask::UIMessage& m, LvChatPanel* p,
+                                              int logical_i, const ChatBubbleDisplay& d) {
+  char line[640];
+  chatBuildCompactLine(m, p, logical_i, d, line, sizeof(line));
+  lv_point_t wrapped;
+  lv_txt_get_size(&wrapped, line, &g_font_12, 0, 0,
+                  s_chat_virt.content_w > 0 ? s_chat_virt.content_w : LV_COORD_MAX,
+                  LV_TEXT_FLAG_NONE);
+  return wrapped.y + 2;   // pad_ver 1+1
+}
+
+static lv_coord_t chatMeasureMessageRowHeight(const UITask::UIMessage& m, LvChatPanel* p,
+                                              int logical_i) {
+  if (s_chat_virt.compact_chat) {
+    ChatBubbleDisplay d{};
+    chatParseMessageDisplay(m, p->channel_mode, s_chat_virt.thread_is_room, d);
+    return chatMeasureCompactRowHeight(m, p, logical_i, d);
+  }
+  return chatMeasureBubbleHeight(m, p->channel_mode, s_chat_virt.thread_is_room,
+                                 s_chat_virt.bubble_max_w);
+}
+
 // Remove bubble/divider widgets only; keep the spacer so scroll height stays valid.
 static void chatVirtClearBubbleWidgets(LvChatPanel* p) {
   if (!p || !p->msgs) return;
@@ -26162,7 +26244,16 @@ static bool chatVirtRebuildLayout(LvChatPanel* p, int n, int divider_i) {
     ContactInfo rc;
     if (g_lv.task->lookupActiveContact(rc)) s_chat_virt.thread_is_room = (rc.type == ADV_TYPE_ROOM);
   }
+  s_chat_virt.compact_chat = touchPrefsGetCompactChat();
+  s_chat_virt.compact_thread_name[0] = '\0';
+  if (s_chat_virt.compact_chat) {
+    bool ch_ = false; uint16_t un_ = 0; uint32_t ts_ = 0;
+    g_lv.task->getThreadInfo(g_lv.task->activeThreadIdx(), ch_, un_, ts_,
+                             s_chat_virt.compact_thread_name,
+                             sizeof(s_chat_virt.compact_thread_name));
+  }
 
+  const lv_coord_t row_gap = s_chat_virt.compact_chat ? kChatCompactRowGap : kChatRowGap;
   int32_t y = 0;
 #if TRACE_MESSAGE_SCROLL_ACTIVITY
   int     measure_fail = 0;
@@ -26171,20 +26262,19 @@ static bool chatVirtRebuildLayout(LvChatPanel* p, int n, int divider_i) {
   for (int i = 0; i < n; ++i) {
     if (divider_i >= 0 && i == divider_i) {
       s_chat_virt.divider_y = y;
-      y += kChatDividerH + kChatRowGap;
+      y += kChatDividerH + row_gap;
     }
     UITask::UIMessage m;
     if (!g_lv.task->getMessageByIndex(s_chat_msg_idx[i], m)) {
       s_chat_virt.offsets[i] = y;
-      y += 20 + kChatRowGap;
+      y += 20 + row_gap;
 #if TRACE_MESSAGE_SCROLL_ACTIVITY
       ++measure_fail;
 #endif
       continue;
     }
     s_chat_virt.offsets[i] = y;
-    y += chatMeasureBubbleHeight(m, p->channel_mode, s_chat_virt.thread_is_room,
-                                 s_chat_virt.bubble_max_w) + kChatRowGap;
+    y += chatMeasureMessageRowHeight(m, p, i) + row_gap;
   }
   s_chat_virt.offsets[n] = y;
   chatVirtUpdateLvScale(p, n, y);
@@ -26378,6 +26468,65 @@ static lv_coord_t chatVirtCreateBubble(LvChatPanel* p, int logical_i, int ring_i
   return bh;
 }
 
+static lv_coord_t chatVirtCreateCompactRow(LvChatPanel* p, int logical_i, int ring_idx,
+                                           lv_coord_t vp_y, lv_coord_t* out_jump_y) {
+  if (!p || !g_lv.task) return 0;
+  UITask::UIMessage m;
+  if (!g_lv.task->getMessageByIndex(ring_idx, m)) return 0;
+
+  ChatBubbleDisplay d{};
+  chatParseMessageDisplay(m, p->channel_mode, s_chat_virt.thread_is_room, d);
+  const bool mentions_me = (p->channel_mode || s_chat_virt.thread_is_room) &&
+                           !m.outgoing && textMentionsMe(d.show_text);
+  char line[640];
+  chatBuildCompactLine(m, p, logical_i, d, line, sizeof(line));
+
+  lv_obj_t* row = lv_label_create(p->msgs);
+  lv_label_set_recolor(row, true);
+  lv_obj_add_flag(row, LV_OBJ_FLAG_FLOATING);
+  lv_obj_set_style_text_font(row, &g_font_12, LV_PART_MAIN);
+  lv_obj_set_style_text_color(row, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
+  lv_label_set_long_mode(row, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(row, s_chat_virt.content_w);
+  lv_label_set_text(row, line);
+  lv_obj_set_style_pad_hor(row, 3, LV_PART_MAIN);
+  lv_obj_set_style_pad_ver(row, 1, LV_PART_MAIN);
+  lv_obj_set_style_radius(row, 3, LV_PART_MAIN);
+  if (mentions_me) {
+    lv_obj_set_style_bg_color(row, lv_color_hex(COLOR_MENTION_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
+  } else if ((logical_i & 1) == 0) {
+    lv_obj_set_style_bg_color(row, lv_color_hex(COLOR_RECV_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
+  }
+  lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(row, bubbleLongPressMenuCb, LV_EVENT_PRESSED,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  lv_obj_add_event_cb(row, bubbleLongPressMenuCb, LV_EVENT_RELEASED,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  lv_obj_add_event_cb(row, bubbleLongPressMenuCb, LV_EVENT_PRESS_LOST,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  lv_obj_add_event_cb(row, bubbleLongPressMenuCb, LV_EVENT_DELETE,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  if (m.outgoing && m.deliv_state == UITask::DELIV_FAILED)
+    lv_obj_add_event_cb(row, bubbleRetryTapCb, LV_EVENT_CLICKED,
+                        reinterpret_cast<void*>(static_cast<intptr_t>(ring_idx)));
+  lv_obj_set_pos(row, 0, vp_y);
+  lv_obj_update_layout(row);
+  const lv_coord_t rh = lv_obj_get_height(row);
+  if (out_jump_y && s_chat_jump_msg_idx >= 0 && ring_idx == s_chat_jump_msg_idx)
+    *out_jump_y = vp_y;
+  lv_obj_set_user_data(row, reinterpret_cast<void*>(static_cast<intptr_t>(logical_i)));
+  return rh;
+}
+
+static lv_coord_t chatVirtCreateMessageRow(LvChatPanel* p, int logical_i, int ring_idx,
+                                           lv_coord_t vp_y, lv_coord_t* out_jump_y) {
+  if (s_chat_virt.compact_chat)
+    return chatVirtCreateCompactRow(p, logical_i, ring_idx, vp_y, out_jump_y);
+  return chatVirtCreateBubble(p, logical_i, ring_idx, vp_y, out_jump_y);
+}
+
 static lv_coord_t chatVirtMsgContentY(int logical_i) {
   if (logical_i < 0 || logical_i >= s_chat_virt.n || !s_chat_virt.offsets) return 0;
   if (chatVirtCompressCoords())
@@ -26475,8 +26624,8 @@ static void chatVirtRenderWindow(LvChatPanel* p, lv_coord_t scroll_y, lv_coord_t
 
   const int32_t virt_top = chatVirtLvToVirt(saved_scroll_y);
   for (int i = i0; i <= i1; ++i) {
-    chatVirtCreateBubble(p, i, s_chat_virt.msg_idx[i], chatVirtMsgViewportY(i, virt_top),
-                         out_jump_y);
+    chatVirtCreateMessageRow(p, i, s_chat_virt.msg_idx[i], chatVirtMsgViewportY(i, virt_top),
+                             out_jump_y);
   }
 
   s_chat_virt.last_i0 = i0;
@@ -26626,8 +26775,10 @@ static void refreshChatDetail(LvChatPanel& p) {
     if (divider_i >= n) divider_i = -1;
   }
 
+  const bool compact_chat = touchPrefsGetCompactChat();
   const bool need_layout = (s_chat_virt.panel != &p) || (s_chat_virt.n != n) ||
-                           !s_chat_virt.offsets;
+                           !s_chat_virt.offsets ||
+                           s_chat_virt.compact_chat != compact_chat;
   if (need_layout) {
     lv_indev_reset(nullptr, nullptr);
     chatVirtClearAllChildren(&p);
