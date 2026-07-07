@@ -3,8 +3,6 @@
 
 #include "../MyMesh.h"
 
-#include <helpers/StorageWriteTrace.h>
-
 #include "device_caps.h"   // CAP_* capability flags (replaces device-name #ifs)
 
 #include <cstring>
@@ -1300,12 +1298,6 @@ static void discChunkKey(int chunk, char* out, size_t cap) {
 }
 static void saveDiscovered() {
   if (!s_discovered || !discBlob()) return;
-  int n_used = 0;
-  for (int i = 0; i < DISCOVERED_MAX; ++i)
-    if (s_discovered[i].used) ++n_used;
-  char det[24];
-  snprintf(det, sizeof det, "n=%d", n_used);
-  STORAGE_WRITE_TRACE_SCOPE2("discovered", det);
   int src = 0;   // walk the ring once, emitting used entries into successive chunk blobs
   for (int chunk = 0; chunk < DISC_CHUNKS; ++chunk) {
     uint8_t* p = s_disc_blob;
@@ -35530,9 +35522,6 @@ bool UITask::loadHistoryFromStorage() {
 bool UITask::saveThreadsToStorage() {
 #if defined(ESP32)
   WdtHeavyGuard _wg;
-  char det[32];
-  snprintf(det, sizeof det, "slots=%d", MAX_UI_THREADS);
-  STORAGE_WRITE_TRACE_SCOPE2("ui_threads_v1", det);
   File f = uiDataOpen(k_ui_threads_path, "w");
   if (!f) return false;
 
@@ -35582,9 +35571,6 @@ static bool uiWriteMsgsFile(const UITask::UIMessage* msgs, int cap,
                             uint16_t count, uint16_t head, uint32_t msgcount) {
 #if defined(ESP32)
   WdtHeavyGuard _wg;   // a fragmenting write can trigger a multi-second SPIFFS GC
-  char det[48];
-  snprintf(det, sizeof det, "slots=%d filled=%d", MAX_UI_MESSAGES, _ui_msg_count);
-  STORAGE_WRITE_TRACE_SCOPE2("ui_msgs_v1", det);
   File f = uiDataOpen(k_ui_msgs_path, "w");
   if (!f) return false;
 
