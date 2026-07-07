@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <string.h>
+#include <stdio.h>
 #include "DataStore.h"
+#include <helpers/StorageWriteTrace.h>
 #if defined(ESP32)
 #include <SD.h>
 #endif
@@ -382,6 +384,18 @@ File file = openRead(_getContactsChannelsFS(), "/contacts3");
 }
 
 void DataStore::saveContacts(DataStoreHost* host, bool (*filter)(const ContactInfo& c)) {
+  int n_save = 0;
+  {
+    uint32_t idx = 0;
+    ContactInfo c;
+    while (host->getContactForSave(idx, c)) {
+      if (!filter || filter(c)) ++n_save;
+      idx++;
+    }
+  }
+  char det[24];
+  snprintf(det, sizeof det, "n=%d", n_save);
+  STORAGE_WRITE_TRACE_SCOPE2("contacts3", det);
   File file = openWrite(_getContactsChannelsFS(), "/contacts3");
   if (file) {
     uint32_t idx = 0;
@@ -611,6 +625,9 @@ uint8_t DataStore::getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_b
 
 bool DataStore::putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len) {
   if (len < PUB_KEY_SIZE+4+SIGNATURE_SIZE || len > MAX_ADVERT_PKT_LEN) return false;
+  char det[32];
+  snprintf(det, sizeof det, "len=%u", (unsigned)len);
+  STORAGE_WRITE_TRACE_SCOPE2("adv_blobs", det);
   checkAdvBlobFile();
   File file = _getContactsChannelsFS()->open("/adv_blobs", FILE_O_WRITE);
   if (file) {
@@ -673,6 +690,9 @@ uint8_t DataStore::getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_b
 }
 
 bool DataStore::putBlobByKey(const uint8_t key[], int key_len, const uint8_t src_buf[], uint8_t len) {
+  char det[32];
+  snprintf(det, sizeof det, "len=%u", (unsigned)len);
+  STORAGE_WRITE_TRACE_SCOPE2("adv_blob", det);
   char path[64];
   makeBlobPath(key, key_len, path, sizeof(path));
 
